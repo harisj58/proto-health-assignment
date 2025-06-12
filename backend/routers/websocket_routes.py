@@ -7,6 +7,7 @@ from datetime import datetime
 import uuid
 
 from utils.database import save_transcription_to_db
+from utils.file_writer import save_audio_file
 
 websocket_router = APIRouter()
 DG_API_KEY = os.getenv("DEEPGRAM_API_KEY")
@@ -24,6 +25,7 @@ async def speech_to_text(websocket: WebSocket):
     session_id = str(uuid.uuid4())
     full_transcription = ""
     session_start_time = None
+    audio_buffer = bytearray()  # Buffer to accumulate audio data
 
     try:
         while True:
@@ -35,8 +37,9 @@ async def speech_to_text(websocket: WebSocket):
                 event = data.get("event")
 
                 if event == "start":
-                    # Record session start time
+                    # Record session start time and reset audio buffer
                     session_start_time = datetime.now()
+                    audio_buffer.clear()
                     print(f"Starting new transcription session with ID: {session_id}")
 
                     # Start new deepgram connection
@@ -147,18 +150,22 @@ async def speech_to_text(websocket: WebSocket):
                     if dg_connection:
                         await dg_connection.finish()
 
-                    # Calculate session duration and save transcription before stopping
+                    # Calculate session duration
                     session_duration = None
                     if session_start_time:
                         session_duration = (
                             datetime.now() - session_start_time
                         ).total_seconds()
 
-                    # Save the full transcription to database
-                    if full_transcription.strip():
+                    # Save the full transcription and audio to database/file
+                    if full_transcription.strip() and audio_buffer:
+                        # Save transcription to database
                         save_transcription_to_db(
                             session_id, full_transcription.strip(), session_duration
                         )
+
+                        # Save audio to WAV file
+                        await save_audio_file(session_id, audio_buffer)
 
                     await websocket.send_json(
                         {
@@ -175,6 +182,11 @@ async def speech_to_text(websocket: WebSocket):
                 if dg_connection:
                     audio_data = msg["bytes"]
                     print(f"Sending audio chunk of {len(audio_data)} bytes to Deepgram")
+
+                    # Accumulate audio data in buffer
+                    audio_buffer.extend(audio_data)
+
+                    # Send to Deepgram
                     dg_connection.send(audio_data)
 
     except WebSocketDisconnect:
@@ -189,11 +201,12 @@ async def speech_to_text(websocket: WebSocket):
             if session_start_time:
                 session_duration = (datetime.now() - session_start_time).total_seconds()
 
-            # Save transcription to database before closing connection
-            if full_transcription.strip():
+            # Save transcription and audio to database/file before closing connection
+            if full_transcription.strip() and audio_buffer:
                 save_transcription_to_db(
                     session_id, full_transcription.strip(), session_duration
                 )
+                await save_audio_file(session_id, audio_buffer)
 
             if dg_connection:
                 await dg_connection.finish()
